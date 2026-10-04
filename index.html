@@ -15,7 +15,7 @@ button.primary{background:#111;color:#fff}
 </head>
 <body>
 <h1>🎧 Salon Reader</h1>
-<p class="small">記事本文だけを抽出して読み上げます。</p>
+<p class="small">Salon.jpの記事本文だけを読み上げます。</p>
 <input id="url" value="https://salon.jp/articles/nishino/s/5phcpAKoH7R">
 <div>
 <button class="primary" onclick="start()">▶ 再生</button>
@@ -28,54 +28,88 @@ button.primary{background:#111;color:#fff}
 <div id="status">待機中</div>
 
 <script>
-let stopped=true, rate=1.2, currentUrl="";
+let stopped=true, rate=1.2;
 const statusEl=document.getElementById("status");
 
 function setRate(v){rate=v; statusEl.textContent="速度 "+v+"x";}
 
-function cleanText(s){
-  return s.replace(/\s+/g," ").replace(/[ \t]+([、。！？])/g,"$1").trim();
+function cleanArticleText(raw){
+  let s=raw;
+
+  // Markdownの画像・リンクを削除/文字だけ残す
+  s=s.replace(/!\[[^\]]*\]\([^)]*\)/g,"");
+  s=s.replace(/\[([^\]]+)\]\([^)]*\)/g,"$1");
+
+  // HTMLタグが残っていた場合
+  s=s.replace(/<[^>]*>/g," ");
+
+  // URLそのものを削除
+  s=s.replace(/https?:\/\/[^\s)\]]+/gi,"");
+
+  // Markdown記号・引用記号など
+  s=s.replace(/^#{1,6}\s*/gm,"");
+  s=s.replace(/^\s*>\s?/gm,"");
+  s=s.replace(/^\s*[-*+]\s+/gm,"");
+
+  // Salon.jpのUI・ナビに出やすい行を除外
+  const skip=[
+    "ホーム","サロン記事","プレゼント","クーポン","チムニーマップ",
+    "近くのストア","サロンメンバーを探す","使い方マニュアル",
+    "お問合せ","プライバシーポリシー","利用規約",
+    "特定商取引法に基づく表記","広告表現ガイドライン",
+    "サロン記事一覧へ","オンラインサロン","サロン記事一覧",
+    "検索したいワード","いいねした記事","新着記事","注目のタグ",
+    "過去の記事","最新の記事をみるには","入会して最新の記事をみる"
+  ];
+
+  const lines=s.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  const result=[];
+  for(const line of lines){
+    if(skip.some(x=>line===x)) continue;
+    if(/^https?:\/\//i.test(line)) continue;
+    if(/^(Image|Button|Input|Select)\b/i.test(line)) continue;
+    if(/^\[[^\]]+\]\([^)]+\)$/.test(line)) continue;
+    result.push(line);
+  }
+
+  // 連続空白を整理
+  return result.join(" ")
+    .replace(/\s+/g," ")
+    .replace(/[ \t]+([、。！？])/g,"$1")
+    .trim();
 }
 
-function extractArticle(doc){
-  // Salon.jpの構造変化に備えて候補を複数試す
-  const selectors=[
-    "article",
-    "[class*='article-body']",
-    "[class*='articleBody']",
-    "[class*='article_content']",
-    "[class*='article-content']",
-    "[class*='entry-content']",
-    "main"
-  ];
-  let candidates=[];
-  for(const sel of selectors){
-    doc.querySelectorAll(sel).forEach(e=>candidates.push(e));
+function extractArticle(markdown){
+  // Jinaの取得結果では、記事タイトル→日付→本文→
+  // 「最新の記事をみるには」の順になっている。
+  const lines=markdown.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+
+  let start=-1;
+  let end=lines.length;
+
+  // 日付行を探す
+  for(let i=0;i<lines.length;i++){
+    if(/^\d{4}\.\d{2}\.\d{2}/.test(lines[i])){
+      start=i+1;
+      break;
+    }
   }
 
-  // 本文らしい要素をスコアリング
-  let best=null,bestScore=0;
-  for(const el of candidates){
-    const clone=el.cloneNode(true);
-    clone.querySelectorAll("script,style,noscript,nav,header,footer,form,button,svg,img,video,a[href]").forEach(x=>{
-      // aはリンク文字だけ残すとURLは読まないが、ナビ等のリンクは後で除外
-      if(x.tagName==="A"){
-        const t=document.createTextNode(x.textContent||"");
-        x.replaceWith(t);
-      } else x.remove();
-    });
-    const text=cleanText(clone.innerText||"");
-    const score=text.length + (el.querySelectorAll("p").length*200);
-    if(score>bestScore){bestScore=score;best={el,text};}
+  // 本文終了位置
+  for(let i=(start>=0?start:0);i<lines.length;i++){
+    if(lines[i].includes("最新の記事をみるには") ||
+       lines[i].includes("入会して最新の記事をみる")){
+      end=i;
+      break;
+    }
   }
 
-  if(!best || best.text.length<100){
-    // 最後の手段：bodyから明らかなUIを削除
-    const clone=doc.body.cloneNode(true);
-    clone.querySelectorAll("script,style,noscript,nav,header,footer,form,button,input,select,textarea,aside,img,video,svg,a").forEach(x=>x.remove());
-    return cleanText(clone.innerText||"");
+  if(start<0){
+    // フォールバック：タイトルの次から
+    start=Math.max(0,lines.findIndex(x=>x.startsWith("# "))+1);
   }
-  return best.text;
+
+  return cleanArticleText(lines.slice(start,end).join("\n"));
 }
 
 function splitText(text,max=1800){
@@ -84,8 +118,7 @@ function splitText(text,max=1800){
     let cut=Math.max(
       text.lastIndexOf("。",max),
       text.lastIndexOf("！",max),
-      text.lastIndexOf("？",max),
-      text.lastIndexOf("\n",max)
+      text.lastIndexOf("？",max)
     );
     if(cut<800) cut=max;
     out.push(text.slice(0,cut+1).trim());
@@ -96,49 +129,50 @@ function splitText(text,max=1800){
 }
 
 function speakChunks(chunks,i=0){
-  if(stopped || i>=chunks.length){ if(!stopped) nextArticle(); return; }
+  if(stopped) return;
+  if(i>=chunks.length){
+    statusEl.textContent="この記事の読み上げが終了しました。";
+    return;
+  }
   const u=new SpeechSynthesisUtterance(chunks[i]);
-  u.lang="ja-JP"; u.rate=rate;
+  u.lang="ja-JP";
+  u.rate=rate;
   u.onend=()=>speakChunks(chunks,i+1);
-  u.onerror=()=>{ if(!stopped) statusEl.textContent="読み上げエラー"; };
+  u.onerror=()=>{if(!stopped)statusEl.textContent="読み上げエラー";};
   speechSynthesis.speak(u);
 }
 
 async function load(url){
   statusEl.textContent="記事を取得中…";
   try{
-    const proxy="https://r.jina.ai/http://"+url.replace(/^https?:\/\//,"");
+    const target=url.replace(/^https?:\/\//,"");
+    const proxy="https://r.jina.ai/http://"+target;
     const r=await fetch(proxy);
     if(!r.ok) throw new Error("取得失敗");
-    const html=await r.text();
-    const doc=new DOMParser().parseFromString(html,"text/html");
-    const title=cleanText(doc.querySelector("h1")?.textContent||doc.title||"");
-    const text=extractArticle(doc);
+    const markdown=await r.text();
+
+    const text=extractArticle(markdown);
     if(text.length<100) throw new Error("本文が見つかりません");
-    statusEl.textContent=(title?title+" / ":"")+"読み上げ中";
+
+    statusEl.textContent="読み上げ中";
     speakChunks(splitText(text));
   }catch(e){
-    statusEl.textContent="記事を取得できませんでした。Salon.jpのログインが必要な記事は、現在の方式では取得できない場合があります。";
+    console.error(e);
+    statusEl.textContent="記事を取得できませんでした。";
   }
 }
 
 function start(){
-  stop();
+  speechSynthesis.cancel();
   stopped=false;
-  currentUrl=document.getElementById("url").value.trim();
-  if(!currentUrl) return;
-  load(currentUrl);
+  const url=document.getElementById("url").value.trim();
+  if(url) load(url);
 }
 
 function stop(){
   stopped=true;
   speechSynthesis.cancel();
   statusEl.textContent="停止";
-}
-
-function nextArticle(){
-  // URL指定方式の試作では自動次記事はまだ限定的
-  statusEl.textContent="この記事の読み上げが終了しました。";
 }
 </script>
 </body>
