@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111">
+<title>Salon Reader</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;margin:0;background:#f5f5f5;color:#111}
+main{max-width:680px;margin:auto;padding:24px 18px 40px}
+h1{font-size:26px;margin:0 0 8px}.sub{color:#666;font-size:14px;margin-bottom:24px}
+label{font-size:13px;color:#555}input,button,select{font:inherit}input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #ccc;border-radius:10px;background:white;margin:7px 0 12px}
+button{border:0;border-radius:12px;padding:14px 18px;cursor:pointer}.primary{background:#111;color:white;width:100%;font-size:18px}.stop{background:#ddd;width:100%;margin-top:10px}
+.row{display:flex;gap:8px;margin:10px 0}.row button{flex:1;background:white;border:1px solid #ddd}
+.card{background:white;border-radius:16px;padding:18px;margin-top:18px;box-shadow:0 2px 12px #0000000d}
+.status{font-weight:700;margin-bottom:8px}.title{font-size:20px;font-weight:700;line-height:1.5}.meta{color:#777;font-size:13px;margin-top:6px}
+.small{font-size:12px;color:#666;line-height:1.6;margin-top:16px}
+</style>
+</head>
+<body>
+<main>
+<h1>🎧 Salon Reader</h1>
+<div class="sub">Salon.jpの記事を順番に読み上げる試作版</div>
+
+<label>最初に読む記事のURL</label>
+<input id="url" value="https://salon.jp/articles/nishino/s/5phcpAKoH7R" inputmode="url">
+
+<button id="play" class="primary">▶ 再生</button>
+<button id="stop" class="stop">■ 停止</button>
+
+<div class="row">
+<button data-rate="1.0">1.0倍</button>
+<button data-rate="1.2">1.2倍</button>
+<button data-rate="1.5">1.5倍</button>
+<button data-rate="1.8">1.8倍</button>
+</div>
+
+<div class="card">
+<div id="status" class="status">待機中</div>
+<div id="title" class="title">記事URLを指定して「再生」</div>
+<div id="meta" class="meta"></div>
+</div>
+
+<div class="small">
+※これは技術検証用の試作です。Salon.jpへのログインが必要な記事では、公開ページ取得方式では本文を取得できない場合があります。<br>
+※iPhoneではまずSafariで開き、再生後に画面をロックして音声が継続するか確認してください。
+</div>
+</main>
+
+<script>
+let running=false, rate=1.2, currentUrl="";
+const $=id=>document.getElementById(id);
+function cleanText(s){
+ return s.replace(/\u00a0/g," ").replace(/[ \t]+/g," ").replace(/\n[ \t]+/g,"\n")
+   .replace(/\n{3,}/g,"\n\n").trim();
+}
+function extract(doc,url){
+ const title=(doc.querySelector("h1")?.innerText||doc.title||"").trim();
+ const date=[...doc.querySelectorAll("body *")].map(x=>x.innerText?.trim()).find(x=>/^\d{4}\.\d{2}\.\d{2}/.test(x))||"";
+ // Salon.jp article content in the supplied page starts after the date and ends before the next-article area.
+ const h1=doc.querySelector("h1");
+ let root=h1;
+ while(root && root.parentElement && root.parentElement.innerText.length<10000) root=root.parentElement;
+ let text="";
+ const candidates=[...doc.querySelectorAll("main,article,[class*='article'],[class*='content']")];
+ for(const c of candidates){
+   const t=cleanText(c.innerText||"");
+   if(t.length>500 && t.length>text.length) text=t;
+ }
+ if(!text) text=cleanText(doc.body.innerText||"");
+ // Remove obvious navigation/footer tail.
+ text=text.split("最新の記事をみるには")[0];
+ text=text.replace(/^.*?オンラインサロン\s*/s,"");
+ const links=[...doc.querySelectorAll("a")].map(a=>({text:cleanText(a.innerText||""),href:a.href})).filter(x=>x.href);
+ let next=null,prev=null;
+ const dated=links.filter(x=>/^\d{4}\.\d{2}\.\d{2}$/.test(x.text));
+ if(dated.length){
+   // On Salon.jp the displayed date links are adjacent previous/next article links.
+   next=dated[0]?.href||null; prev=dated[1]?.href||null;
+ }
+ return {title,date,text,next,prev,url};
+}
+async function fetchPage(url){
+ const res=await fetch("https://r.jina.ai/http://"+url.replace(/^https?:\/\//,""),{headers:{"Accept":"text/plain"}});
+ if(!res.ok) throw new Error("記事の取得に失敗しました ("+res.status+")");
+ const txt=await res.text();
+ const doc=new DOMParser().parseFromString(txt,"text/html");
+ return extract(doc,url);
+}
+function speak(text,onend){
+ speechSynthesis.cancel();
+ const chunks=[];
+ for(let i=0;i<text.length;i+=2200) chunks.push(text.slice(i,i+2200));
+ let i=0;
+ function go(){
+   if(!running) return;
+   if(i>=chunks.length){onend();return}
+   const u=new SpeechSynthesisUtterance(chunks[i++]);
+   u.lang="ja-JP";u.rate=rate;
+   u.onend=go;u.onerror=()=>onend();speechSynthesis.speak(u);
+ }
+ go();
+}
+async function loadAndSpeak(url){
+ currentUrl=url;$("status").textContent="記事を取得中…";
+ const a=await fetchPage(url);
+ if(!running)return;
+ $("title").textContent=a.title||"（タイトル取得なし）";
+ $("meta").textContent=a.date||"";
+ $("status").textContent="読み上げ中";
+ speak(a.text,async()=>{ if(!running)return; $("status").textContent="次の記事へ…"; if(a.next) setTimeout(()=>loadAndSpeak(a.next),500); else {running=false;$("status").textContent="次の記事が見つかりません";}});
+}
+$("play").onclick=async()=>{
+ if(running)return;
+ running=true;$("status").textContent="開始…";
+ try{await loadAndSpeak($("url").value.trim())}catch(e){running=false;$("status").textContent="エラー";alert(e.message)}
+};
+$("stop").onclick=()=>{running=false;speechSynthesis.cancel();$("status").textContent="停止しました"};
+document.querySelectorAll("[data-rate]").forEach(b=>b.onclick=()=>rate=Number(b.dataset.rate));
+</script>
+</body>
+</html>
